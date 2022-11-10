@@ -191,47 +191,37 @@ class AnsweringMachine(Generic[_T]):
         )
         self(*args, **kargs)
 
+    def bg(self, *args, **kwargs):
+        # type: (Any, Any) -> AsyncSniffer
+        kwargs.setdefault("bg", True)
+        self(*args, **kwargs)
+        return self.sniffer
+
     def __call__(self, *args, **kargs):
         # type: (Any, Any) -> None
+        bg = kargs.pop("bg", False)
         optsend, optsniff = self.parse_all_options(2, kargs)
         self.optsend = self.defoptsend.copy()
         self.optsend.update(optsend)
         self.optsniff = self.defoptsniff.copy()
         self.optsniff.update(optsniff)
 
-        try:
-            self.sniff()
-        except KeyboardInterrupt:
-            print("Interrupted by user")
+        if bg:
+            self.sniff_bg()
+        else:
+            try:
+                self.sniff()
+            except KeyboardInterrupt:
+                print("Interrupted by user")
 
     def sniff(self):
         # type: () -> None
         sniff(**self.optsniff)
 
-
-class AnsweringMachineUtils:
-    @staticmethod
-    def reverse_packet(req, mirror_src=False):
-        # type: (Packet, bool) -> Optional[Packet]
-        from scapy.layers.inet import IP, TCP, UDP
-        from scapy.layers.inet6 import IPv6
-        if IP in req:
-            resp = IP(
-                dst=req[IP].src,
-                src=mirror_src and req[IP].dst or None,
-            )
-        elif IPv6 in req:
-            resp = IPv6(
-                dst=req[IPv6].src,
-                src=mirror_src and req[IPv6].dst or None,
-            )
-        else:
-            return None
-        for layer in [UDP, TCP]:
-            if req.haslayer(layer):
-                resp /= layer(dport=req.sport, sport=req.dport)
-                break
-        return cast(Packet, resp)
+    def sniff_bg(self):
+        # type: () -> None
+        self.sniffer = AsyncSniffer(**self.optsniff)
+        self.sniffer.start()
 
 
 class AnsweringMachineTCP(AnsweringMachine[Packet]):

@@ -469,7 +469,8 @@ class Packet(six.with_metaclass(Packet_metaclass,  # type: ignore
                 any2i = lambda x, y: y  # type: Callable[..., Any]
             else:
                 any2i = fld.any2i
-            self.fields[attr] = any2i(self, val)
+            self.fields[attr] = val if isinstance(val, RawVal) else \
+                any2i(self, val)
             self.explicit = 0
             self.raw_packet_cache = None
             self.raw_packet_cache_fields = None
@@ -581,8 +582,7 @@ class Packet(six.with_metaclass(Packet_metaclass,  # type: ignore
     else:
         def __str__(self):
             # type: () -> str
-            warning("Calling str(pkt) on Python 3 makes no sense!")
-            return str(self.build())
+            return self.summary()
 
     def __bytes__(self):
         # type: () -> bytes
@@ -1660,7 +1660,7 @@ values.
             elif callable(getattr(fv, 'command', None)):
                 fv = fv.command()
             else:
-                fv = repr(fv)
+                fv = repr(fld.i2h(self, fv))
             f.append("%s=%s" % (fn, fv))
         c = "%s(%s)" % (self.__class__.__name__, ", ".join(f))
         pc = self.payload.command()
