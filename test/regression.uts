@@ -53,9 +53,19 @@ from scapy import _parse_tag, _version_from_git_describe
 from scapy.config import _version_checker
 
 b = Bunch(returncode=0, communicate=lambda *args, **kargs: (b"v2.4.5rc1-261-g44b98e14", None))
-with mock.patch('scapy.subprocess.Popen', return_value=b) as popen:
-    class GitModuleScapy(object):
-        __version__ = _version_from_git_describe()
+with mock.patch('scapy.subprocess.Popen', return_value=b):
+    with mock.patch('scapy.os.path.isdir', return_value=True):
+        class GitModuleScapy(object):
+            __version__ = _version_from_git_describe()
+
+# GH3847
+with mock.patch('scapy.subprocess.Popen', return_value=b):
+    with mock.patch('scapy.os.path.isdir', return_value=False):
+        try:
+            _version_from_git_describe()
+            assert False
+        except ValueError:
+            pass
 
 assert GitModuleScapy.__version__ == '2.4.5rc1.dev261'
 assert _version_checker(GitModuleScapy, (2, 4, 5))
@@ -215,7 +225,7 @@ except:
 assert not conf.use_bpf
 
 = Configuration conf.use_pcap
-~ linux
+~ linux libpcap
 
 if not conf.use_pcap:
     assert not conf.iface.provider.libpcap
@@ -442,16 +452,6 @@ monty_data = b"Stop! Who approaches the Bridge of Death must answer me these que
 hex_data = bytes_hex(monty_data)
 assert hex_data == b'53746f70212057686f20617070726f61636865732074686520427269646765206f66204465617468206d75737420616e73776572206d65207468657365207175657374696f6e732074687265652c202765726520746865206f746865722073696465206865207365652e'
 assert hex_bytes(hex_data) == monty_data
-
-= test gzip_decompress/gzip_compress
-
-from scapy.compat import gzip_compress, gzip_decompress
-
-gziped_data = b"\x1f\x8b\x08\x00N\xf5\xd7\\\x02\xff\x1d\x8b9\x0e\x800\x0c\x04\xbf\xb2T4\x88G ~@A\x1d\x91\x85\xa4H\x1cl#\xbe\xcf\xd1\xac4\x9a\xd9\xc5\xa5uX\x93 \xb4\xa6\x12\xb6D\x83'b\xd2\x1c\x0fBv\xcc\x0c\x9eP.s\x84j7\x15\x85_b\xc4y\xd1<K\xfd.J\x0e\xe8\xa9\xbf\x83\xbc\xa3\xb0\x1c\x89\x97\x8c\x1c\x1fc\xbeS\\j\x00\x00\x00"
-assert gzip_decompress(gziped_data) == monty_data
-
-data = b"sweet celestia"
-assert gzip_decompress(gzip_compress(data)) == data
 
 = orb/chb
 
@@ -771,6 +771,11 @@ expected_ret2 = """
 assert ret1 != ret2
 assert expected_ret1 in ret1
 assert expected_ret2 in ret2
+
+# Test corner cases that should not crash
+
+hexdiff(b"abc", IP() / TCP())
+hexdiff(IP() / TCP(), b"abc")
 
 = Test mysummary functions - Ether
 
@@ -1811,7 +1816,7 @@ def _test_select(select):
 assert _test_select()
 
 = Test L2ListenTcpdump socket
-~ netaccess FIXME_py3
+~ netaccess
 
 # Needs to be fixed. Fails randomly
 #import time
@@ -2029,13 +2034,13 @@ assert list(pktpcap) == list(sniff(offline=fdesc))
 fdesc.close()
 
 = Check offline sniff() with a filter (by filename)
-~ tcpdump
+~ tcpdump libpcap
 pktpcap_flt = [(proto, sniff(offline=filename, filter=proto.__name__.lower()))
                for proto in [ICMP, UDP, TCP]]
 assert all(list(pktpcap[proto]) == list(packets) for proto, packets in pktpcap_flt)
 
 = Check offline sniff() with a filter (by file object)
-~ tcpdump
+~ tcpdump libpcap
 fdesc = open(filename, "rb")
 pktpcap_tcp = sniff(offline=fdesc, filter="tcp")
 fdesc.close()
@@ -2043,22 +2048,25 @@ assert list(pktpcap[TCP]) == list(pktpcap_tcp)
 os.unlink(filename)
 
 = Check offline sniff() with a PcapNg file and a filter (by file object)
-~ tcpdump
+~ tcpdump libpcap
 
 pcapng_data = b'\n\r\r\n`\x00\x00\x00M<+\x1a\x01\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\x04\x009\x00TShark (Wireshark) 3.2.3 (Git v3.2.3 packaged as 3.2.3-1)\x00\x00\x00\x00\x00\x00\x00`\x00\x00\x00\x01\x00\x00\x00\x14\x00\x00\x00\xe4\x00\x00\x00\xff\xff\x00\x00\x14\x00\x00\x00\x06\x00\x00\x00<\x00\x00\x00\x00\x00\x00\x00\x98\xcd\x05\x00\x19\x83\xf7\x9e\x1c\x00\x00\x00\x1c\x00\x00\x00E\x00\x00\x1c\x00\x01\x00\x00@\x11|\xce\x7f\x00\x00\x01\x7f\x00\x00\x01\x005\x005\x00\x08\x01r<\x00\x00\x00'
 
-fdesc, filename = tempfile.mkstemp()
-os.close(fdesc)
-fd = open(filename, "wb")
-fd.write(pcapng_data)
-fd.close()
+if OPENBSD:
+    # Note: OpenBSD tcpdump does not support PcapNg
+    assert True
+else:
+    fdesc, filename = tempfile.mkstemp()
+    os.close(fdesc)
+    fd = open(filename, "wb")
+    fd.write(pcapng_data)
+    fd.close()
+    packets = sniff(offline=filename, filter="udp")
+    os.unlink(filename)
+    assert UDP in packets[0]
 
-packets = sniff(offline=filename, filter="udp")
-os.unlink(filename)
-assert UDP in packets[0]
-
-= Check offline sniff() with Packets and tcpdump
-~ tcpdump
+= Check offline sniff() with Packets and tcpdump with a filter
+~ tcpdump libpcap
 
 l = sniff(offline=IP()/UDP(sport=(10000, 10001)), filter="udp")
 assert len(l) == 2
@@ -2072,7 +2080,7 @@ l = sniff(offline=IP()/UDP(sport=(10000, 10001)), filter="tcp")
 assert len(l) == 0
 
 = Check offline sniff() with Packets, tcpdump and a bad filter
-~ tcpdump
+~ tcpdump libpcap
 
 try:
     sniff(offline=IP()/UDP(), filter="bad filter")
@@ -2230,6 +2238,19 @@ assert len([p for p in RawPcapReader(fd)]) == 1
 for (x, y) in RawPcapReader(fd):
     pass
 
+= Check RawPcapReader with a Context Manager
+~ pcap
+
+filename = get_temp_file(fd=False)
+wrpcap(filename, [IP()/TCP(), IP()/UDP()])
+
+try:
+    with RawPcapReader(filename) as reader:
+        packet = next(reader, None)
+    assert True
+except TypeError:
+    assert False
+
 = Check RawPcapWriter
 ~ pcap
 
@@ -2288,8 +2309,8 @@ data = tcpdump([Ether()/IP()/ICMP()], dump=True, args=['-nn']).split(b'\n')
 print(data)
 assert b'127.0.0.1 > 127.0.0.1: ICMP' in data[0].upper()
 
-= Check tcpdump() command with linktype
-~ tcpdump
+= Check tcpdump() command with linktype 
+~ tcpdump libpcap
 
 f = BytesIO()
 pkt = Ether()/IP()/ICMP()
@@ -2314,7 +2335,7 @@ f.close()
 del f, pkt
 
 = Check tcpdump() command with linktype and args
-~ tcpdump
+~ tcpdump libpcap
 
 f = BytesIO()
 pkt = Ether()/IP()/ICMP()
@@ -4639,11 +4660,11 @@ test_padding()
 
 def test_nzpadding():
     with ContextManagerCaptureOutput() as cmco:
-        p = PacketList([IP()/conf.padding_layer("A%s" % i) for i in range(2)])
+        p = PacketList([IP()/conf.padding_layer("AB"), IP()/conf.padding_layer("\x00\x00")])
         p.nzpadding()
         result_pl_nzpadding = cmco.get_output()
-    assert len(result_pl_nzpadding.split('\n')) == 5
-    assert "0000  41 30" in result_pl_nzpadding
+    assert len(result_pl_nzpadding.split('\n')) == 3
+    assert "0000  41 42" in result_pl_nzpadding
 
 test_nzpadding()
 
@@ -4754,18 +4775,34 @@ assert pl[1][Ether].dst == '00:22:33:44:55:66'
 = _version()
 
 import os
-version_filename = os.path.join(scapy._SCAPY_PKG_DIR, "VERSION")
+from datetime import datetime
 
+version_filename = os.path.join(scapy._SCAPY_PKG_DIR, "VERSION")
+mtime = datetime.utcfromtimestamp(os.path.getmtime(scapy.__file__))
 version = "2.0.0"
 with open(version_filename, "w") as fd:
     fd.write(version)
 
+os.environ["SCAPY_VERSION"] = "9.9.9"
+assert scapy._version() == "9.9.9"
+del os.environ["SCAPY_VERSION"]
+
+assert scapy._version() == version
+os.unlink(version_filename)
+
 import mock
-with mock.patch("scapy._version_from_git_describe") as version_mocked:
-    version_mocked.side_effect = Exception()
-    assert scapy._version() == version
-    os.unlink(version_filename)
-    assert scapy._version() == "unknown.version"
+with mock.patch("scapy._version_from_git_archive") as archive:
+    archive.return_value = "4.4.4"
+    assert scapy._version() == "4.4.4"
+    archive.side_effect = ValueError()
+    with mock.patch("scapy._version_from_git_describe") as git:
+        git.return_value = "3.3.3"
+        assert scapy._version() == "3.3.3"
+        git.side_effect = Exception()
+        assert scapy._version() == mtime.strftime("%Y.%m.%d")
+        with mock.patch("os.path.getmtime") as getmtime:
+            getmtime.side_effect = Exception()
+            assert scapy._version() == "0.0.0"
 
 
 = UTscapy HTML output

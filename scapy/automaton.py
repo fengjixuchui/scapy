@@ -33,7 +33,6 @@ from scapy.data import MTU
 from scapy.supersocket import SuperSocket
 from scapy.packet import Packet
 from scapy.consts import WINDOWS
-import scapy.libs.six as six
 
 from scapy.compat import (
     Any,
@@ -89,6 +88,10 @@ def select_objects(inputs, remain):
         if getattr(i, "__selectable_force_select__", False):
             natives.append(i)
         elif i.fileno() < 0:
+            # Special case: On Windows, we consider that an object that returns
+            # a negative fileno (impossible), is always readable. This is used
+            # in very few places but important (e.g. PcapReader), where we have
+            # no valid fileno (and will stop on EOFError).
             results.add(i)
         else:
             events.append(i)
@@ -131,8 +134,7 @@ def select_objects(inputs, remain):
 _T = TypeVar("_T")
 
 
-@six.add_metaclass(_Generic_metaclass)
-class ObjectPipe(Generic[_T]):
+class ObjectPipe(Generic[_T], metaclass=_Generic_metaclass):
     def __init__(self, name=None):
         # type: (Optional[str]) -> None
         self.name = name or "ObjectPipe"
@@ -140,7 +142,6 @@ class ObjectPipe(Generic[_T]):
         self.__rd, self.__wr = os.pipe()
         self.__queue = deque()  # type: Deque[_T]
         if WINDOWS:
-            self._fd = None  # type: Optional[int]
             self._wincreate()
 
     if WINDOWS:
@@ -153,27 +154,23 @@ class ObjectPipe(Generic[_T]):
 
         def _winset(self):
             # type: () -> None
-            if ctypes.windll.kernel32.SetEvent(
-                    ctypes.c_void_p(self._fd)) == 0:
+            if ctypes.windll.kernel32.SetEvent(ctypes.c_void_p(self._fd)) == 0:
                 warning(ctypes.FormatError(ctypes.GetLastError()))
 
         def _winreset(self):
             # type: () -> None
-            if ctypes.windll.kernel32.ResetEvent(
-                    ctypes.c_void_p(self._fd)) == 0:
+            if ctypes.windll.kernel32.ResetEvent(ctypes.c_void_p(self._fd)) == 0:
                 warning(ctypes.FormatError(ctypes.GetLastError()))
 
         def _winclose(self):
             # type: () -> None
-            if self._fd and ctypes.windll.kernel32.CloseHandle(
-                    ctypes.c_void_p(self._fd)) == 0:
+            if ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(self._fd)) == 0:
                 warning(ctypes.FormatError(ctypes.GetLastError()))
-                self._fd = None
 
     def fileno(self):
         # type: () -> int
         if WINDOWS:
-            return self._fd if self._fd is not None else -1
+            return self._fd
         return self.__rd
 
     def send(self, obj):
@@ -199,6 +196,8 @@ class ObjectPipe(Generic[_T]):
     def recv(self, n=0):
         # type: (Optional[int]) -> Optional[_T]
         if self.closed:
+            if self.__queue:
+                return self.__queue.popleft()
             return None
         os.read(self.__rd, 1)
         elt = self.__queue.popleft()
@@ -219,12 +218,11 @@ class ObjectPipe(Generic[_T]):
     def close(self):
         # type: () -> None
         if not self.closed:
-            self.closed = True
             os.close(self.__rd)
             os.close(self.__wr)
-            self.__queue.clear()
             if WINDOWS:
                 self._winclose()
+            self.closed = True
 
     def __repr__(self):
         # type: () -> str
@@ -260,9 +258,11 @@ class Message:
 
     def __repr__(self):
         # type: () -> str
-        return "<Message %s>" % " ".join("%s=%r" % (k, v)
-                                         for (k, v) in six.iteritems(self.__dict__)  # noqa: E501
-                                         if not k.startswith("_"))
+        return "<Message %s>" % " ".join(
+            "%s=%r" % (k, v)
+            for k, v in self.__dict__.items()
+            if not k.startswith("_")
+        )
 
 
 class Timer():
@@ -646,6 +646,7 @@ class _ATMT_supersocket(SuperSocket):
         # type: () -> None
         if not self.closed:
             self.atmt.stop()
+            self.atmt.destroy()
             self.spa.close()
             self.spb.close()
             self.closed = True
@@ -693,11 +694,11 @@ class Automaton_metaclass(type):
         while classes:
             c = classes.pop(0)  # order is important to avoid breaking method overloading  # noqa: E501
             classes += list(c.__bases__)
-            for k, v in six.iteritems(c.__dict__):
+            for k, v in c.__dict__.items():
                 if k not in members:
                     members[k] = v
 
-        decorated = [v for v in six.itervalues(members)
+        decorated = [v for v in members.values()
                      if hasattr(v, "atmt_type")]
 
         for m in decorated:
@@ -731,11 +732,13 @@ class Automaton_metaclass(type):
                 for co in m.atmt_cond:
                     cls.actions[co].append(m)
 
-        for v in itertools.chain(six.itervalues(cls.conditions),
-                                 six.itervalues(cls.recv_conditions),
-                                 six.itervalues(cls.ioevents)):
+        for v in itertools.chain(
+            cls.conditions.values(),
+            cls.recv_conditions.values(),
+            cls.ioevents.values()
+        ):
             v.sort(key=lambda x: x.atmt_prio)
-        for condname, actlst in six.iteritems(cls.actions):
+        for condname, actlst in cls.actions.items():
             actlst.sort(key=lambda x: x.atmt_cond[condname])
 
         for ioev in cls.iosupersockets:
@@ -759,7 +762,7 @@ class Automaton_metaclass(type):
         s = 'digraph "%s" {\n' % self.__class__.__name__
 
         se = ""  # Keep initial nodes at the beginning for better rendering
-        for st in six.itervalues(self.states):
+        for st in self.states.values():
             if st.atmt_initial:
                 se = ('\t"%s" [ style=filled, fillcolor=blue, shape=box, root=true];\n' % st.atmt_state) + se  # noqa: E501
             elif st.atmt_final:
@@ -770,7 +773,7 @@ class Automaton_metaclass(type):
                 se += '\t"%s" [ style=filled, fillcolor=orange, shape=box, root=true ];\n' % st.atmt_state  # noqa: E501
         s += se
 
-        for st in six.itervalues(self.states):
+        for st in self.states.values():
             for n in st.atmt_origfunc.__code__.co_names + st.atmt_origfunc.__code__.co_consts:  # noqa: E501
                 if n in self.states:
                     s += '\t"%s" -> "%s" [ color=green ];\n' % (st.atmt_state, n)  # noqa: E501
@@ -785,7 +788,7 @@ class Automaton_metaclass(type):
                         for x in self.actions[f.atmt_condname]:
                             line += "\\l>[%s]" % x.__name__
                         s += '\t"%s" -> "%s" [label="%s", color=%s];\n' % (k, n, line, c)  # noqa: E501
-        for k, timers in six.iteritems(self.timeout):
+        for k, timers in self.timeout.items():
             for timer in timers:
                 for n in (timer._func.__code__.co_names +
                           timer._func.__code__.co_consts):
@@ -804,8 +807,7 @@ class Automaton_metaclass(type):
         return do_graph(s, **kargs)
 
 
-@six.add_metaclass(Automaton_metaclass)
-class Automaton:
+class Automaton(metaclass=Automaton_metaclass):
     states = {}             # type: Dict[str, _StateWrapper]
     state = None            # type: ATMT.NewStateRequested
     recv_conditions = {}    # type: Dict[str, List[_StateWrapper]]
@@ -886,7 +888,7 @@ class Automaton:
 
     def timer_by_name(self, name):
         # type: (str) -> Optional[Timer]
-        for _, timers in six.iteritems(self.timeout):
+        for _, timers in self.timeout.items():
             for timer in timers:  # type: Timer
                 if timer._func.atmt_condname == name:
                     return timer
@@ -1046,6 +1048,7 @@ class Automaton:
     def __del__(self):
         # type: () -> None
         self.stop()
+        self.destroy()
 
     def _run_condition(self, cond, *args, **kargs):
         # type: (_StateWrapper, Any, Any) -> None
@@ -1096,8 +1099,12 @@ class Automaton:
             # Start the automaton
             self.state = self.initial_states[0](self)
             self.send_sock = self.send_sock_class(**self.socket_kargs)
-            self.listen_sock = self.recv_sock_class(**self.socket_kargs)
-            self.packets = PacketList(name="session[%s]" % self.__class__.__name__)  # noqa: E501
+            if self.recv_conditions:
+                # Only start a receiving socket if we have at least one recv_conditions
+                self.listen_sock = self.recv_sock_class(**self.socket_kargs)
+            else:
+                self.listen_sock = None
+            self.packets = PacketList(name="session[%s]" % self.__class__.__name__)
 
             singlestep = True
             iterator = self._do_iter()
@@ -1149,6 +1156,10 @@ class Automaton:
                 self.cmdout.send(m)
             self.debug(3, "Stopping control thread (tid=%i)" % self.threadid)
             self.threadid = None
+            if getattr(self, "listen_sock", None):
+                self.listen_sock.close()
+            if getattr(self, "send_sock", None):
+                self.send_sock.close()
 
     def _do_iter(self):
         # type: () -> Iterator[Union[Automaton.AutomatonException, Automaton.AutomatonStopped, ATMT.NewStateRequested, None]] # noqa: E501
@@ -1196,7 +1207,7 @@ class Automaton:
                 time_previous = time.time()
 
                 fds = [self.cmdin]
-                if len(self.recv_conditions[self.state.state]) > 0:
+                if self.listen_sock and self.recv_conditions[self.state.state]:
                     fds.append(self.listen_sock)
                 for ioev in self.ioevents[self.state.state]:
                     fds.append(self.ioin[ioev.atmt_ioname])
@@ -1273,8 +1284,10 @@ class Automaton:
 
     def start(self, *args, **kargs):
         # type: (Any, Any) -> None
-        if not self.started.locked():
-            self._do_start(*args, **kargs)
+        if self.started.locked():
+            raise ValueError("Already started")
+        # Start the control thread
+        self._do_start(*args, **kargs)
 
     def run(self,
             resume=None,    # type: Optional[Message]
@@ -1301,40 +1314,64 @@ class Automaton:
             elif c.type == _ATMT_Command.BREAKPOINT:
                 raise self.Breakpoint("breakpoint triggered on state [%s]" % c.state.state, state=c.state.state)  # noqa: E501
             elif c.type == _ATMT_Command.EXCEPTION:
-                six.reraise(c.exc_info[0], c.exc_info[1], c.exc_info[2])
+                # this code comes from the `six` module (`.reraise()`)
+                # to raise an exception with specified exc_info.
+                value = c.exc_info[0]() if c.exc_info[1] is None else c.exc_info[1]  # type: ignore  # noqa: E501
+                if value.__traceback__ is not c.exc_info[2]:
+                    raise value.with_traceback(c.exc_info[2])
+                raise value
         return None
 
     def runbg(self, resume=None, wait=False):
         # type: (Optional[Message], Optional[bool]) -> None
         self.run(resume, wait)
 
-    def next(self):
+    def __next__(self):
         # type: () -> Any
         return self.run(resume=Message(type=_ATMT_Command.NEXT))
-    __next__ = next
 
     def _flush_inout(self):
         # type: () -> None
-        with self.started:
-            # Flush command pipes
-            while True:
-                r = select_objects([self.cmdin, self.cmdout], 0)
-                if not r:
-                    break
-                for fd in r:
-                    fd.recv()
+        # Flush command pipes
+        for cmd in [self.cmdin, self.cmdout]:
+            cmd.clear()
+
+    def destroy(self):
+        # type: () -> None
+        """
+        Destroys a stopped Automaton: this cleanups all opened file descriptors.
+        Required on PyPy for instance where the garbage collector behaves differently.
+        """
+        if self.started.locked():
+            raise ValueError("Can't close running Automaton ! Call stop() beforehand")
+        self._flush_inout()
+        # Close command pipes
+        self.cmdin.close()
+        self.cmdout.close()
+        # Close opened ioins/ioouts
+        for i in itertools.chain(self.ioin.values(), self.ioout.values()):
+            if isinstance(i, ObjectPipe):
+                i.close()
 
     def stop(self, wait=True):
         # type: (bool) -> None
-        self.cmdin.send(Message(type=_ATMT_Command.STOP))
+        try:
+            self.cmdin.send(Message(type=_ATMT_Command.STOP))
+        except OSError:
+            pass
         if wait:
-            self._flush_inout()
+            with self.started:
+                self._flush_inout()
 
     def forcestop(self, wait=True):
         # type: (bool) -> None
-        self.cmdin.send(Message(type=_ATMT_Command.FORCESTOP))
+        try:
+            self.cmdin.send(Message(type=_ATMT_Command.FORCESTOP))
+        except OSError:
+            pass
         if wait:
-            self._flush_inout()
+            with self.started:
+                self._flush_inout()
 
     def restart(self, *args, **kargs):
         # type: (Any, Any) -> None

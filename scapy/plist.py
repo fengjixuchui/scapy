@@ -8,10 +8,9 @@ PacketList: holds several packets and allows to do operations on them.
 """
 
 
-from __future__ import absolute_import
-from __future__ import print_function
 import os
 from collections import defaultdict
+from typing import NamedTuple
 
 from scapy.compat import lambda_tuple_converter
 from scapy.config import conf
@@ -36,7 +35,6 @@ from scapy.compat import (
     Generic,
     Iterator,
     List,
-    NamedTuple,
     Optional,
     Tuple,
     Type,
@@ -471,7 +469,7 @@ class _PacketList(Generic[_Inner]):
             p = self._elt2pkt(res)
             if p.haslayer(conf.padding_layer):
                 pad = p.getlayer(conf.padding_layer).load  # type: ignore
-                if pad == pad[0] * len(pad):
+                if pad == pad[:1] * len(pad):
                     continue
                 if lfilter is None or lfilter(p):
                     print("%s %s %s" % (conf.color_theme.id(i, fmt="%04i"),

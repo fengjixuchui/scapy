@@ -7,8 +7,6 @@
 General utility functions.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 from decimal import Decimal
 
@@ -17,6 +15,7 @@ import collections
 import decimal
 import difflib
 import gzip
+import locale
 import os
 import random
 import re
@@ -34,7 +33,7 @@ from scapy.libs.six.moves import range, input, zip_longest
 
 from scapy.config import conf
 from scapy.consts import DARWIN, OPENBSD, WINDOWS
-from scapy.data import MTU, DLT_EN10MB
+from scapy.data import MTU, DLT_EN10MB, DLT_RAW
 from scapy.compat import orb, plain_str, chb, bytes_base64,\
     base64_bytes, hex_bytes, lambda_tuple_converter, bytes_encode
 from scapy.error import log_runtime, Scapy_Exception, warning
@@ -243,10 +242,9 @@ def restart():
     if not conf.interactive or not os.path.isfile(sys.argv[0]):
         raise OSError("Scapy was not started from console")
     if WINDOWS:
+        res_code = 1
         try:
             res_code = subprocess.call([sys.executable] + sys.argv)
-        except KeyboardInterrupt:
-            res_code = 1
         finally:
             os._exit(res_code)
     os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -454,7 +452,7 @@ def hexdiff(a, b, autojunk=False):
 
         cl = ""
         for j in range(16):
-            if i + j < btx_len:
+            if i + j < min(len(backtrackx), len(backtracky)):
                 if line[j]:
                     col = colorize[(linex[j] != liney[j]) * (doy - dox)]
                     print(col("%02X" % orb(line[j])), end=' ')
@@ -701,6 +699,15 @@ def ltoa(x):
 def itom(x):
     # type: (int) -> int
     return (0xffffffff00000000 >> x) & 0xffffffff
+
+
+def decode_locale_str(x):
+    # type: (bytes) -> str
+    """
+    Decode bytes into a string using the system locale.
+    Useful on Windows where it can be unusual (e.g. cp1252)
+    """
+    return x.decode(encoding=locale.getlocale()[1] or "utf-8", errors="replace")
 
 
 class ContextManagerSubprocess(object):
@@ -1248,6 +1255,10 @@ class RawPcapReader:
         )
         self.linktype = linktype
         self.snaplen = snaplen
+
+    def __enter__(self):
+        # type: () -> RawPcapReader
+        return self
 
     def __iter__(self):
         # type: () -> RawPcapReader
@@ -2708,6 +2719,8 @@ def tcpdump(
                     try:
                         _, metadata = rd._read_packet()
                         linktype = metadata.linktype
+                        if OPENBSD and linktype == 228:
+                            linktype = DLT_RAW
                     except EOFError:
                         raise ValueError(
                             "Cannot get linktype from a PcapNg packet."
@@ -3155,7 +3168,7 @@ class PeriodicSenderThread(threading.Thread):
         while not self._stopped.is_set() and not self._socket.closed:
             for p in self._pkts:
                 self._socket.send(p)
-                time.sleep(self._interval)
+                self._stopped.wait(timeout=self._interval)
                 if self._stopped.is_set() or self._socket.closed:
                     break
 

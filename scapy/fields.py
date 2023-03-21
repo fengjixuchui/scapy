@@ -9,7 +9,6 @@
 Fields: basic data structures that make up parts of packets.
 """
 
-from __future__ import absolute_import
 import calendar
 import collections
 import copy
@@ -1111,6 +1110,10 @@ class NBytesField(Field[int, List[int]]):
         return (s[self.sz:],
                 self.m2i(pkt, self.struct.unpack(s[:self.sz])))  # type: ignore
 
+    def randval(self):
+        # type: () -> RandNum
+        return RandNum(0, 2 ** (self.sz * 8) - 1)
+
 
 class XNBytesField(NBytesField):
     def i2repr(self, pkt, x):
@@ -1428,7 +1431,7 @@ class StrField(_StrField[bytes]):
 class StrFieldUtf16(StrField):
     def h2i(self, pkt, x):
         # type: (Optional[Packet], Optional[str]) -> bytes
-        return plain_str(x).encode('utf-16')[2:]
+        return plain_str(x).encode('utf-16-le')
 
     def any2i(self, pkt, x):
         # type: (Optional[Packet], Optional[str]) -> bytes
@@ -1442,7 +1445,7 @@ class StrFieldUtf16(StrField):
 
     def i2h(self, pkt, x):
         # type: (Optional[Packet], bytes) -> str
-        return bytes_encode(x).decode('utf-16', errors="replace")
+        return bytes_encode(x).decode('utf-16-le', errors="replace")
 
 
 class _StrEnumField:
@@ -1529,15 +1532,19 @@ class _PacketField(_StrField[K]):
         return fuzz(self.cls())  # type: ignore
 
 
-class PacketField(_PacketField[BasePacket]):
+class _PacketFieldSingle(_PacketField[K]):
     def any2i(self, pkt, x):
-        # type: (Optional[Packet], BasePacket) -> BasePacket
+        # type: (Optional[Packet], Any) -> K
         if x and pkt and hasattr(x, "add_parent"):
             cast("Packet", x).add_parent(pkt)
-        return super(PacketField, self).any2i(pkt, x)
+        return super(_PacketFieldSingle, self).any2i(pkt, x)
 
 
-class PacketLenField(_PacketField[Optional[BasePacket]]):
+class PacketField(_PacketFieldSingle[BasePacket]):
+    pass
+
+
+class PacketLenField(_PacketFieldSingle[Optional[BasePacket]]):
     __slots__ = ["length_from"]
 
     def __init__(self,
@@ -1554,7 +1561,7 @@ class PacketLenField(_PacketField[Optional[BasePacket]]):
                  pkt,  # type: Packet
                  s,  # type: bytes
                  ):
-        # type: (...) -> Tuple[bytes, Optional[Packet]]
+        # type: (...) -> Tuple[bytes, Optional[BasePacket]]
         len_pkt = self.length_from(pkt)
         i = None
         if len_pkt:

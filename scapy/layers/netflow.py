@@ -32,6 +32,7 @@ Using the netflowv9_defragment/ipfix_defragment commands:
 
 import socket
 import struct
+from collections import Counter
 
 from scapy.config import conf
 from scapy.data import IP_PROTOS
@@ -1259,11 +1260,23 @@ class NetflowHeaderV9(Packet):
                    IntField("SourceID", 0)]
 
     def post_build(self, pkt, pay):
+
+        def count_by_layer(layer):
+            if type(layer) == NetflowFlowsetV9:
+                return len(layer.templates)
+            elif type(layer) == NetflowDataflowsetV9:
+                return len(layer.records)
+            elif type(layer) == NetflowOptionsFlowsetV9:
+                return 1
+            else:
+                return 0
+
         if self.count is None:
-            count = sum(1 for x in self.layers() if x in [
-                NetflowFlowsetV9,
-                NetflowDataflowsetV9,
-                NetflowOptionsFlowsetV9]
+            # https://www.rfc-editor.org/rfc/rfc3954#section-5.1
+            count = sum(
+                sum(count_by_layer(self.getlayer(layer_cls, nth))
+                    for nth in range(1, n + 1))
+                for layer_cls, n in Counter(self.layers()).items()
             )
             pkt = struct.pack("!H", count) + pkt[2:]
         return pkt + pay
@@ -1659,12 +1672,12 @@ class NetflowOptionsFlowsetV9(Packet):
         return conf.padding_layer
 
     def post_build(self, pkt, pay):
-        if self.length is None:
-            pkt = pkt[:2] + struct.pack("!H", len(pkt)) + pkt[4:]
         if self.pad is None:
             # Padding 4-bytes with b"\x00"
             start = 10 + self.option_scope_length + self.option_field_length
             pkt = pkt[:start] + (-len(pkt) % 4) * b"\x00"
+        if self.length is None:
+            pkt = pkt[:2] + struct.pack("!H", len(pkt)) + pkt[4:]
         return pkt + pay
 
 
